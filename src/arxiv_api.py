@@ -1,5 +1,6 @@
 # src/arxiv_api.py
 import time
+import datetime as _dt
 import requests
 import xml.etree.ElementTree as ET
 
@@ -54,7 +55,6 @@ class ArxivSearcher:
             all_papers.extend(papers)
 
             if progress_callback:
-                # 因为无法预知总数，第二个参数给 None；UI 里用 indeterminate 即可
                 progress_callback(len(all_papers), None)
 
             start += self.PAGE_SIZE
@@ -77,19 +77,15 @@ class ArxivSearcher:
 
         # 3) 日期范围：精确到月
         start_date = f"{start_ym[0]:04d}{start_ym[1]:02d}010000"
-        # 结束：取该月最后一天 23:59 —— 用简单方法：下个月 1 号减一天
         y, m = end_ym
         if m == 12:
             ny, nm = y + 1, 1
         else:
             ny, nm = y, m + 1
-        # 用 datetime 求上一个月最后一天
-        import datetime as _dt
         last_day = (_dt.date(ny, nm, 1) - _dt.timedelta(days=1)).day
         end_date = f"{y:04d}{m:02d}{last_day:02d}2359"
 
-        date_part = f"submittedDate:[{start_date} TO {end_date}]"
-        parts.append(date_part)
+        parts.append(f"submittedDate:[{start_date} TO {end_date}]")
 
         return " AND ".join(parts)
 
@@ -110,9 +106,14 @@ class ArxivSearcher:
             if not all(x is not None for x in (title, summary, link, published)):
                 continue
 
-            # 顺便把主分类也解析出来（可选，写进 Excel 更有用）
             primary = entry.find('arxiv:primary_category', ns)
             category = primary.get('term') if primary is not None else ''
+
+            # 新增：解析 comment 字段
+            comment = entry.find('arxiv:comment', ns)
+            comment_text = ''
+            if comment is not None and comment.text:
+                comment_text = comment.text.strip().replace('\n', ' ')
 
             entries.append({
                 'title': title.text.strip().replace('\n', ' '),
@@ -120,5 +121,6 @@ class ArxivSearcher:
                 'link': link.text.strip(),
                 'published': published.text.strip()[:10],
                 'category': category,
+                'comment': comment_text,
             })
         return entries

@@ -12,9 +12,9 @@ if PROJECT_ROOT not in sys.path:
 
 from src.arxiv_api import ArxivSearcher
 from src.excel_exporter import ExcelExporter
+from src.markdown_exporter import MarkdownExporter
 
 
-# 常用分类，可按需扩展
 CATEGORY_OPTIONS = [
     ("cs.CV", "计算机视觉"),
     ("cs.LG", "机器学习"),
@@ -29,8 +29,6 @@ CATEGORY_OPTIONS = [
 
 
 class ProgressWindow:
-    """点击搜索后弹出的独立进度窗口，居中显示。"""
-
     WIDTH = 360
     HEIGHT = 140
 
@@ -39,11 +37,9 @@ class ProgressWindow:
         self.top.title("正在抓取...")
         self.top.resizable(False, False)
         self.top.transient(parent)
-        self.top.grab_set()  # 模态
-        # 屏蔽关闭按钮，防止误关
+        self.top.grab_set()
         self.top.protocol("WM_DELETE_WINDOW", lambda: None)
 
-        # ---- 居中定位 ----
         parent.update_idletasks()
         px = parent.winfo_rootx()
         py = parent.winfo_rooty()
@@ -55,14 +51,11 @@ class ProgressWindow:
 
         tk.Label(self.top, text="正在从 arXiv 抓取论文...",
                  font=("", 11)).pack(pady=(18, 8))
-
         self.progress = ttk.Progressbar(self.top, mode="indeterminate", length=300)
         self.progress.pack(pady=5)
         self.progress.start(12)
-
         self.count_label = tk.Label(self.top, text="已抓取 0 篇", fg="gray")
         self.count_label.pack(pady=4)
-
         tk.Label(self.top, text="请勿关闭本窗口", fg="#aaaaaa",
                  font=("", 8)).pack()
 
@@ -80,7 +73,6 @@ class App:
         self.root = root
         self.root.title("CatchEdge - arXiv 论文搜索导出")
         self.root.resizable(False, False)
-        # 先画一遍控件再自适应大小，避免底部留白
         self._build_widgets()
         self.root.update_idletasks()
         w = self.root.winfo_reqwidth()
@@ -88,15 +80,14 @@ class App:
         self.root.geometry(f"{w}x{h}")
 
     def _build_widgets(self):
-        # ---- 关键词 ----
         tk.Label(self.root, text="搜索关键词 (例如: 3d anomaly detection):",
                  anchor="w").pack(fill="x", padx=20, pady=(18, 4))
         self.keyword_entry = tk.Entry(self.root, width=70)
         self.keyword_entry.pack(padx=20, fill="x")
         self.keyword_entry.focus_set()
 
-        # ---- 日期范围 ----
-        date_frame = tk.LabelFrame(self.root, text="选择文章提交日期范围（精确到月）",
+        # 日期
+        date_frame = tk.LabelFrame(self.root, text="提交日期范围（精确到月）",
                                    padx=10, pady=8)
         date_frame.pack(fill="x", padx=20, pady=(14, 6))
 
@@ -124,7 +115,7 @@ class App:
         self.end_month.grid(row=0, column=8)
         tk.Label(date_frame, text="月").grid(row=0, column=9, padx=(2, 0))
 
-        # ---- 分类多选 ----
+        # 分类
         cat_frame = tk.LabelFrame(self.root, text="分类筛选（不勾选 = 不限）",
                                   padx=10, pady=8)
         cat_frame.pack(fill="x", padx=20, pady=(6, 6))
@@ -139,16 +130,15 @@ class App:
                                 variable=var, anchor="w")
             cb.grid(row=row, column=col, sticky="w", padx=6, pady=2)
 
-        # ---- 按钮 ----
+        # 按钮
         self.search_btn = tk.Button(
-            self.root, text="确定并导出 Excel",
+            self.root, text="确定并导出（Excel + Markdown）",
             command=self.start_search,
             bg="#4CAF50", fg="white",
             padx=24, pady=6, relief="flat"
         )
         self.search_btn.pack(pady=(14, 18))
 
-    # ---------- 事件 ----------
     def start_search(self):
         keyword = self.keyword_entry.get().strip()
         if not keyword:
@@ -188,25 +178,38 @@ class App:
 
             if not papers:
                 self.root.after(0, lambda: self._on_finish(
-                    False, "未找到相关论文，请调整关键词、日期或分类。", None))
+                    False, "未找到相关论文，请调整关键词、日期或分类。", None, None))
                 return
 
             kw = keyword.replace(' ', '_').replace('/', '_')
             ym = f"{start_ym[0]}{start_ym[1]:02d}-{end_ym[0]}{end_ym[1]:02d}"
-            filename = f"arxiv_{kw}_{ym}.xlsx"
-            filepath = ExcelExporter.export(papers, filename=filename)
+            base_name = f"arxiv_{kw}_{ym}"
 
-            if filepath:
-                msg = f"下载成功！共 {len(papers)} 篇，已保存至:\n{filepath}"
-                self.root.after(0, lambda: self._on_finish(True, msg, filepath))
+            # 1) Excel
+            excel_path = ExcelExporter.export(papers, filename=f"{base_name}.xlsx")
+
+            # 2) Markdown
+            meta = {
+                'keyword': keyword,
+                'start_ym': start_ym,
+                'end_ym': end_ym,
+                'categories': categories,
+            }
+            md_path = MarkdownExporter.export(papers, meta, filename=f"{base_name}.md")
+
+            if excel_path and md_path:
+                msg = (f"下载成功！共 {len(papers)} 篇\n\n"
+                       f"Excel: {excel_path}\n"
+                       f"Markdown: {md_path}")
+                self.root.after(0, lambda: self._on_finish(True, msg, excel_path, md_path))
             else:
                 self.root.after(0, lambda: self._on_finish(
-                    False, "导出 Excel 时发生错误。", None))
+                    False, "部分文件导出失败，请查看控制台输出。", excel_path, md_path))
 
         except Exception as e:
-            self.root.after(0, lambda: self._on_finish(False, f"发生错误: {e}", None))
+            self.root.after(0, lambda: self._on_finish(False, f"发生错误: {e}", None, None))
 
-    def _on_finish(self, success, message, filepath):
+    def _on_finish(self, success, message, excel_path, md_path):
         if hasattr(self, "progress_win") and self.progress_win:
             self.progress_win.close()
             self.progress_win = None
