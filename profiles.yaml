@@ -1,0 +1,27 @@
+# 每个研究方向一份配置。GUI 和命令行都按这里的 key 选择。
+#
+# keywords：用来**搜索** arXiv 的词，宽一点才不漏召回。
+# terms：用来**打分**的领域专有词，窄一点才排得准（别人写这类论文绕不开的说法）。
+#        不填就退回用 keywords 打分。
+# exclude：命中即剔除。
+# interest：阶段 3 交给 LLM 的"我的关注点"。
+
+profiles:
+  3dad:
+    name: 3D 异常检测
+    keywords: ["3d anomaly detection", "point cloud anomaly"]
+    terms: ["3d-ad", "point cloud", "industrial anomaly", "multimodal anomaly",
+            "anomaly localization", "mvtec", "real3d-ad", "eyecandies"]
+    categories: [cs.CV, cs.LG]
+    exclude: []
+    interest: "工业质检中的无监督 3D 异常检测，关注跨域泛化与统一模型"
+
+  mi:
+    name: 模态缺失
+    keywords: ["modality-incomplete", "missing modalities"]
+    terms: ["missing modality", "modality missing", "missing modalities",
+            "modality-incomplete", "incomplete multimodal", "sensor failure",
+            "degraded modality"]
+    categories: [cs.CV]
+    exclude: []
+    interest: "多模态融合在传感器退化/缺失条件下的鲁棒性"
