@@ -3,6 +3,7 @@ import os
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -11,6 +12,25 @@ DEFAULT_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 # 颜色（ARGB，不带 #）
 COLOR_ACCEPTED = "FF2E7D32"      # 深绿：已接收
 COLOR_UNDER_REVIEW = "FFED7D31"  # 橙：审稿中
+
+# 列顺序：判定紧跟在标题后面，别让人往右翻才知道该不该看
+COL_TITLE = 1
+COL_VERDICT = 2
+COL_RELEVANCE = 3
+COL_NOVELTY = 4
+COL_REASON = 5
+COL_SUMMARY = 6
+COL_LINK = 7
+COL_PUBLISHED = 8
+COL_CATEGORY = 9
+COL_COMMENT = 10
+
+HEADERS = ["标题", "判定", "相关度", "创新度", "理由", "摘要",
+           "arXiv 链接", "发布日期", "分类", "Comment"]
+
+WIDTHS = {COL_TITLE: 50, COL_VERDICT: 10, COL_RELEVANCE: 8, COL_NOVELTY: 8,
+          COL_REASON: 60, COL_SUMMARY: 80, COL_LINK: 35, COL_PUBLISHED: 15,
+          COL_CATEGORY: 12, COL_COMMENT: 45}
 
 
 class ExcelExporter:
@@ -30,11 +50,10 @@ class ExcelExporter:
         ws = wb.active
         ws.title = "ArXiv Papers"
 
-        headers = ["标题", "摘要", "arXiv 链接", "发布日期", "分类", "Comment"]
-        ws.append(headers)
+        ws.append(HEADERS)
 
         header_font = Font(bold=True)
-        for col_num in range(1, len(headers) + 1):
+        for col_num in range(1, len(HEADERS) + 1):
             cell = ws.cell(row=1, column=col_num)
             cell.font = header_font
             cell.alignment = Alignment(horizontal='center')
@@ -42,6 +61,10 @@ class ExcelExporter:
         for paper in papers:
             ws.append([
                 paper.get('title', ''),
+                paper.get('verdict', ''),
+                paper.get('relevance', ''),
+                paper.get('novelty', ''),
+                paper.get('reason', ''),
                 paper.get('summary', ''),
                 paper.get('link', ''),
                 paper.get('published', ''),
@@ -49,26 +72,26 @@ class ExcelExporter:
                 paper.get('comment', ''),
             ])
 
-        # 列宽
-        ws.column_dimensions['A'].width = 50
-        ws.column_dimensions['B'].width = 80
-        ws.column_dimensions['C'].width = 35
-        ws.column_dimensions['D'].width = 15
-        ws.column_dimensions['E'].width = 12
-        ws.column_dimensions['F'].width = 45
+        for col, width in WIDTHS.items():
+            ws.column_dimensions[get_column_letter(col)].width = width
 
-        # 摘要列自动换行
-        for row in ws.iter_rows(min_row=2, min_col=2, max_col=2):
-            for cell in row:
-                cell.alignment = Alignment(wrap_text=True, vertical='top')
+        # 需要自动换行的列：标题 / 理由 / 摘要 / Comment
+        for col in (COL_TITLE, COL_REASON, COL_SUMMARY, COL_COMMENT):
+            for row in ws.iter_rows(min_row=2, min_col=col, max_col=col):
+                for cell in row:
+                    cell.alignment = Alignment(wrap_text=True, vertical='top')
 
-        # Comment 列自动换行
-        for row in ws.iter_rows(min_row=2, min_col=6, max_col=6):
+        # 判定列加粗居中，扫一眼就能看出该不该看
+        for row in ws.iter_rows(min_row=2, min_col=COL_VERDICT, max_col=COL_VERDICT):
             for cell in row:
-                cell.alignment = Alignment(wrap_text=True, vertical='top')
+                cell.alignment = Alignment(horizontal='center', vertical='top')
+                if cell.value == "精读":
+                    cell.font = Font(bold=True, color=COLOR_ACCEPTED)
+                elif cell.value == "跳过":
+                    cell.font = Font(color="FF9E9E9E")
 
         # arXiv 链接超链接化
-        for row in ws.iter_rows(min_row=2, min_col=3, max_col=3):
+        for row in ws.iter_rows(min_row=2, min_col=COL_LINK, max_col=COL_LINK):
             for cell in row:
                 if cell.value:
                     cell.hyperlink = cell.value
@@ -76,10 +99,8 @@ class ExcelExporter:
 
         # Comment 关键词高亮
         for row_idx in range(2, len(papers) + 2):
-            cell = ws.cell(row=row_idx, column=6)
+            cell = ws.cell(row=row_idx, column=COL_COMMENT)
             text = (cell.value or '').lower()
-
-            # 先清掉默认颜色干扰（如果你后续给 Comment 加了其他格式，这里保留字体加粗即可）
             if 'accepted' in text:
                 cell.font = Font(color=COLOR_ACCEPTED, bold=True)
             elif 'under review' in text:

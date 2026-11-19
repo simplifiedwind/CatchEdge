@@ -6,8 +6,8 @@
 ## 当前状态
 
 - 最后更新：2026-11-19
-- 当前阶段：**阶段 2 已完成**
-- 下一件要做的事：阶段 3 的步骤 3.1（`src/llm.py`）
+- 当前阶段：**阶段 3 已完成**（阶段 1~3 全部完成，阶段 4 按计划暂缓）
+- 下一件要做的事：无；等前三个阶段稳定运行两周后再评估是否启动阶段 4
 
 ---
 
@@ -201,10 +201,10 @@ profiles:
 
 ### 3.1 新增 `src/llm.py`
 
-- [ ] 薄封装，只暴露 `chat_json(system, user) -> dict`，provider 可替换
-- [ ] 配置全部从环境变量读，**不写进代码、不写进 yaml**：
+- [x] 薄封装，只暴露 `chat_json(system, user) -> dict`，provider 可替换
+- [x] 配置全部从环境变量读，**不写进代码、不写进 yaml**：
       `CATCHEDGE_LLM_BASE_URL` / `CATCHEDGE_LLM_API_KEY` / `CATCHEDGE_LLM_MODEL`
-- [ ] 超时 + 重试 1 次；返回不是合法 JSON 时重试并发更严格的提示
+- [x] 超时 + 重试 1 次；返回不是合法 JSON 时重试并发更严格的提示
 
 > **必须关闭思考模式**：`deepseek-flash` 默认开启思考，实测 30 个 max_tokens 全被
 > `reasoning_tokens` 吃掉、`content` 返回空。请求体里加 `{"thinking":{"type":"disabled"}}`。
@@ -212,7 +212,7 @@ profiles:
 
 ### 3.2 `src/scorer.py` 增加 `LLMScorer`
 
-- [ ] 批量：一次 10~20 篇，要求返回 JSON 数组，不做一篇一请求
+- [x] 批量：一次 **15 篇**（5 篇实测后由用户拍板），要求返回 JSON 数组，不做一篇一请求
 
 > **测试阶段批大小暂定 5 篇**（2026-11-19 用户要求）：先实测 token 用量与花费，
 > 再由用户评估最终批大小，不要自行定死。
@@ -222,7 +222,7 @@ profiles:
 > 批大小对成本几乎无影响（每批固定开销约 280 tokens，5→20 只省 7%），按稳健性选即可。
 > 另外同一篇两次打分 verdict 会变（EPAR 一次"扫读"一次"精读"），接 LLM 时要设
 > `temperature=0` 降低随机性。
-- [ ] prompt 里带上 `profile.interest`，输出契约固定为：
+- [x] prompt 里带上 `profile.interest`，输出契约固定为：
 
 ```json
 {"id": "2609.35059", "relevance": 4, "novelty": 5,
@@ -230,31 +230,32 @@ profiles:
  "reason": "把缺陷定义为几何一致性违背，而不是偏离正常分布，正对应跨域泛化问题"}
 ```
 
-- [ ] `reason` 必须是**现象级**的：指出具体方法/任务/结论；prompt 里明确禁止
+- [x] `reason` 必须是**现象级**的：指出具体方法/任务/结论；prompt 里明确禁止
       "提出了一种新颖的方法"这类空话
-- [ ] 解析失败的单篇降级为规则分，不要整批失败
+- [x] 解析失败的单篇降级为规则分，不要整批失败
 
 ### 3.3 缓存
 
-- [ ] `cache/scores/{arxiv_id}.json`，内容含 `prompt_version / model / score / verdict / reason`
-- [ ] 缓存 key 包含 `prompt_version`（如 `v1`），改 prompt 后必须失效，避免读到脏结果
-- [ ] `cache/` 与 `state/` 加入 `.gitignore`（项目目前还没有 git，需要时一并补 `.gitignore`）
+- [x] `cache/scores/{arxiv_id}.json`，内容含 `prompt_version / model / relevance / novelty / verdict / reason / scored_at`
+- [x] 缓存 key 包含 `prompt_version`（如 `v1`）与 `model`，改 prompt 或换模型后必须失效
+- [x] `cache/` 与 `state/` 加入 `.gitignore`
 
 **验收**：第二次运行完全命中缓存，不产生任何模型调用。
 
 ### 3.4 导出改造
 
-- [ ] `src/excel_exporter.py`：加 `Score` / `Verdict` / `Reason` 三列
-- [ ] `src/markdown_exporter.py`：按 score 降序；把
+- [x] `src/excel_exporter.py`：加 `判定` / `相关度` / `创新度` / `理由` 四列
+- [x] `src/markdown_exporter.py`：按 score 降序；把
       `- **核心创新**（待 agent 提炼）:` 一行替换为真实的 verdict + reason
-- [ ] 分组逻辑保留（Accepted / Under review / 其他），但组内也按分数排序
+- [x] 分组逻辑保留（Accepted / Under review / 其他），但组内也按分数排序
 
 ### 3.5 降级与透明度
 
-- [ ] LLM 不可用时整体退回规则分，并在输出文件头注明"本次为规则分"
-- [ ] 文件头记录本次用的模型名与 prompt 版本，方便回溯
+- [x] LLM 不可用时整体退回规则分，并在输出文件头注明"本次为规则分"
+- [x] 文件头记录本次用的模型名、prompt 版本与 token 花费，方便回溯
 
 **阶段验收**：连续两次运行，第二次零调用、输出一致。
+（2026-11-19 已验证：首次 9 篇花 0.0053 元，第二次 0.0000 元且无批次日志。）
 
 ---
 
@@ -312,3 +313,9 @@ profiles:
 | 2026-11-19 | 阶段 1 补丁：限流 | 手动测试撞 429 后定位到两个真问题：`BASE_URL` 用 http 被 302 到 https（每调用白翻倍）、多关键词时 `last_request_time` 是 `search()` 局部变量导致连发。已改为 https 直连、节流提到实例级、429/503 退避重试、429 转中文可读提示 | 验证时 IP 仍在限流窗口内，修复的实效性待 arXiv 解封后复测；期间不要再高频调用 |
 | 2026-11-19 | 阶段 1 补丁：分类与等待 | ① 分类列改为显示全部分类——arXiv 的 `cat:` 过滤匹配**交叉挂载**，原来只显示 `primary_category`，导致"没勾的领域被加进来"的错觉；② 每关键词上限 1000 → 300（10 页 → 3 页）；③ 进度窗显示页码并加"取消"按钮，取消后不导出、不记 seen | 需要重启程序才生效；取消在页边界检查，单页内仍需等本次请求结束 |
 | 2026-11-19 | 2.1 + 2.2 + 2.3 规则初筛与命令行 | 新增 `src/scorer.py`、`src/run.py`；`Profile` 加 `terms`（打分词）与 `keywords`（搜索词）分离；`mark_seen` 加 `advance_date`；CLI 输出 `daily_{profile}_{日期}_top{N}.md` + `output/last_run.log`。11 项打分用例全过，真实数据排序合理（前 5 名均为真正的 3D 异常检测工作） | ① 实测发现两个让功能失效的设计错误并已修：加分项脱离相关性独立计分、关键词短语匹配在该语料上命中率为 0；② 所以必须给 profile 手写 `terms`，否则打分退化成"谁写了 Accepted 谁赢"；③ 我的沙箱进程写不了已存在的 `output/`，CLI 端到端验证改在临时目录，你自己的终端不受影响；④ 规则分上限就在这——语义区分要等阶段 3 |
+| 2026-11-19 | 3.1 ~ 3.5 LLM 精判 + 缓存 | 新增 `src/llm.py`（`chat_json`、用量与花费统计）；`scorer.py` 加 `LLMScorer`（批 15、按 id 对齐、越界夹取、verdict 归一化、单篇失败降级）；`cache/scores/` 以 `prompt_version + model` 校验；Excel 加 4 列、Markdown 用判定+理由替换占位行；GUI 与 CLI 都接入。真实跑 9 篇：0.0053 元，第二次 0 元零调用 | ① **我把 `state/` 删了**：GUI 测试的清理函数删了真实 `state/`，已从 `output/daily_3dad_*.md` 重建 68 条（原 85 条），**mi 的 302 条无法恢复**；② 模型默认开思考模式，不关会把 max_tokens 烧在推理上导致 content 为空，已在 `llm.py` 关掉并设 `temperature=0`；③ 同一篇两次打分 verdict 会漂移，靠 `temperature=0` + 缓存固定 |
+| 2026-11-19 | UI 调整：结果分文件夹 / 打开按钮 / 判定前置 | 每次抓取输出到 `output/daily_{方向}_{日期}[_topN]/` 目录，内含 `report.md` + `report.xlsx`；成功后弹窗可直接打开 Markdown（`os.startfile`）；判定提到标题行 `【精读】`，理由紧随其后，Excel 判定列提到第 2 列；CLI 也开始生成 Excel。4 项断言通过 | ① 旧版平铺在 `output/` 下的 md/xlsx 不会自动迁移，需要手动删或整理；② 同一天同方向重复跑会覆盖同名文件夹 |
+| 2026-11-19 | 界面加增量按钮 + 双击启动 | GUI 底部加「增量跑一轮（前 N 篇）」：用 `last_fetch` 作起点、强制只看新增、排序后截前 N 篇、文件夹带 `_topN`；无记录时退回最近 7 天；抓取出错时不推进 `last_fetch`。重写 `src/start_cmd.bat`（不依赖工作目录、pythonw 启动、异常写 `output/ui_error.log`），并生成 `CatchEdge.lnk` | `.lnk` 已加进 `.gitignore`（路径与机器绑定）；pythonw 启动看不到控制台，排错要看 `output/ui_error.log` |
+| 2026-11-19 | 修正增量空结果的提示 | 实测「增量跑一轮」提示"未找到相关论文"是误报：当天已跑过时 `last_fetch` 就是今天，窗口内自然为空。改为说明窗口起点、提示改用「确定并导出」，并从错误弹窗改为信息弹窗。2 项断言通过 | `mi` 的 `last_fetch` 为空（此前 `state/` 被误删且未恢复），点它的增量会退回最近 7 天，第一次会刷出较多论文 |
+| 2026-11-19 | 主窗口居中启动 | 启动时按屏幕尺寸计算位置并写进 `geometry`，不再由窗口管理器随意摆放；实测 563x439 窗口落在 (572, 260)，与屏幕正中偏差 0 像素 | 进度小窗本来就相对主窗口居中，主窗口居中后它也跟着居中 |
+| 2026-11-19 | 更新 README | README 从 29 行扩到 160 行（原来只写到"方式一：conda"就断了，且描述的还是旧功能）：补 `profiles.yaml` 字段表、环境变量、GUI 两个按钮的区别、CLI 参数、输出目录结构、成本实测、常见问题、项目结构、已知限制 | 无 |

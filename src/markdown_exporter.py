@@ -67,7 +67,11 @@ class MarkdownExporter:
         lines.append(f"- 论文总数：{len(papers)}")
         lines.append(f"- 状态分布：Accepted {len(accepted)} 篇 / "
                      f"Under review {len(under_review)} 篇 / "
-                     f"其他 {len(others)} 篇\n")
+                     f"其他 {len(others)} 篇")
+        if any(p.get('verdict') for p in papers):
+            lines.append("- 排序：组内按模型判定分数从高到低；标题前的【精读】/【扫读】/【跳过】是判定")
+            lines.append("- 阅读建议：从上往下看【精读】的即可，【跳过】的不用展开")
+        lines.append("")
         lines.append("---\n")
 
         # ---- 给 agent 的提示词 ----
@@ -77,11 +81,13 @@ class MarkdownExporter:
 
         # ---- 分组内容 ----
         lines.extend(MarkdownExporter._render_group(
-            "✅ 已接收（Accepted）— 创新点已定局", accepted))
+            "✅ 已接收（Accepted）— 创新点已定局",
+            MarkdownExporter._order(accepted)))
         lines.extend(MarkdownExporter._render_group(
-            "🟡 审稿中（Under review）— 创新点竞争窗口", under_review))
+            "🟡 审稿中（Under review）— 创新点竞争窗口",
+            MarkdownExporter._order(under_review)))
         lines.extend(MarkdownExporter._render_group(
-            "⚪ 其他", others))
+            "⚪ 其他", MarkdownExporter._order(others)))
 
         try:
             with open(filepath, "w", encoding="utf-8") as f:
@@ -91,6 +97,12 @@ class MarkdownExporter:
         except Exception as e:
             print(f"[Markdown] 写入失败: {e}")
             return None
+
+    @staticmethod
+    def _order(items):
+        """组内按分数降序，同分时新的在前。"""
+        items = sorted(items, key=lambda p: p.get('published', ''), reverse=True)
+        return sorted(items, key=lambda p: p.get('score', -1), reverse=True)
 
     @staticmethod
     def _render_group(title, papers):
@@ -108,11 +120,19 @@ class MarkdownExporter:
             comment = p.get('comment', '') or '—'
             summary = p.get('summary', '').strip()
 
-            out.append(f"### {idx}. {title_text}\n")
+            verdict = p.get('verdict')
+            tag = f"【{verdict}】" if verdict else ""
+            out.append(f"### {idx}. {tag}{title_text}\n")
+            if verdict:
+                out.append(f"- **理由**: {p.get('reason') or '—'}")
+                out.append(f"- **相关度**: {p.get('relevance', '-')} · "
+                           f"**创新度**: {p.get('novelty', '-')}")
             out.append(f"- **arXiv**: [{link.split('/')[-1]}]({link})")
             out.append(f"- **提交日期**: {published}")
             out.append(f"- **分类**: {category}")
             out.append(f"- **Comment**: {comment}")
             out.append(f"- **摘要**: {summary}")
-            out.append("- **核心创新**（待 agent 提炼）: \n")
+            if not verdict:
+                out.append("- **核心创新**（待 agent 提炼）: ")
+            out.append("")
         return out

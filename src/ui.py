@@ -4,17 +4,19 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from src import llm
 from src.arxiv_api import ArxivSearcher, paper_id
 from src.excel_exporter import ExcelExporter
 from src.markdown_exporter import MarkdownExporter
 from src.profile import load_profiles
-from src.state import load_state, mark_seen
+from src.scorer import LLMScorer, llm_score
+from src.state import last_fetch, load_state, mark_seen
 
 
 CATEGORY_OPTIONS = [
@@ -33,6 +35,17 @@ CATEGORY_OPTIONS = [
 # 每个关键词最多抓多少篇。1000 条 = 10 页 × 3 秒，光等待就半分钟，
 # 碰上限流重试能拖到几分钟；对"看最新的"来说 300 条（3 页）足够。
 MAX_RESULTS_PER_KEYWORD = 300
+
+# 每次抓取的结果单独放一个文件夹，避免 md/xlsx 在 output 里堆成一坨
+OUTPUT_ROOT = os.path.join(PROJECT_ROOT, "output")
+
+
+def open_with_default_app(path):
+    """用系统默认程序打开文件；Windows 上是 os.startfile。"""
+    try:
+        os.startfile(path)
+    except (AttributeError, OSError) as e:
+        messagebox.showerror("打不开", f"无法打开：\n{path}\n\n{e}")
 
 
 class ProgressWindow:
@@ -82,6 +95,9 @@ class ProgressWindow:
         else:
             self.count_label.config(text=f"已抓取 {n} 篇")
 
+    def set_phase(self, text):
+        self.count_label.config(text=text)
+
     def close(self):
         self.progress.stop()
         self.top.grab_release()
@@ -105,7 +121,10 @@ class App:
         self.root.update_idletasks()
         w = self.root.winfo_reqwidth()
         h = self.root.winfo_reqheight()
-        self.root.geometry(f"{w}x{h}")
+        # 放到屏幕正中间，否则会由窗口管理器随意摆放
+        x = max((self.root.winfo_screenwidth() - w) // 2, 0)
+        y = max((self.root.winfo_screenheight() - h) // 2, 0)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _build_widgets(self):
         profile_frame = tk.Frame(self.root)
@@ -179,7 +198,22 @@ class App:
             bg="#4CAF50", fg="white",
             padx=24, pady=6, relief="flat"
         )
-        self.search_btn.pack(pady=(14, 18))
+        self.search_btn.pack(pady=(14, 8))
+
+        # 增量模式：不用选日期，从上次抓取日往后，只导出前 N 篇
+        quick_frame = tk.Frame(self.root)
+        quick_frame.pack(pady=(0, 16))
+        tk.Label(quick_frame, text="增量跑一轮（从上次抓取日之后，只导出前"
+                 ).pack(side="left")
+        self.quick_top = tk.StringVar(value="20")
+        ttk.Spinbox(quick_frame, from_=1, to=200, width=5,
+                    textvariable=self.quick_top).pack(side="left", padx=4)
+        tk.Label(quick_frame, text="篇）").pack(side="left")
+        self.quick_btn = tk.Button(
+            quick_frame, text="开始", command=self.start_quick,
+            bg="#2196F3", fg="white", padx=16, pady=3, relief="flat"
+        )
+        self.quick_btn.pack(side="left", padx=(10, 0))
 
         if self.profiles:
             first = next(iter(self.profiles))
@@ -211,6 +245,28 @@ class App:
         self.keyword_entry.insert(0, ", ".join(profile.keywords))
         for code, var in self.cat_vars.items():
             var.set(code in profile.categories)
+
+    def _score_with_llm(self, papers, profile):
+        """给论文补上 LLM 判定。失败时论文不带 score，导出按日期排。"""
+        scorer = LLMScorer()
+
+        def on_batch(index, total):
+            self.root.after(0, lambda: self.progress_win.set_phase(
+                f"正在精判第 {index}/{total} 批"))
+
+        results = scorer.score_many(papers, profile, progress=on_batch)
+        for paper in papers:
+            hit = results.get(paper_id(paper))
+            if not hit:
+                continue
+            paper.update(
+                score=llm_score(hit["relevance"], hit["novelty"]),
+                relevance=hit["relevance"],
+                novelty=hit["novelty"],
+                verdict=hit["verdict"],
+                reason=hit["reason"],
+            )
+        return scorer.last_error
 
     def start_search(self):
         profile_key = self._selected_profile_key()
@@ -244,8 +300,50 @@ class App:
             daemon=True,
         ).start()
 
+    def start_quick(self):
+        """增量模式：不选日期，从上次抓取日之后抓，只导出分数最高的前 N 篇。"""
+        profile_key = self._selected_profile_key()
+        if not profile_key:
+            messagebox.showwarning("配置缺失", "请选择一个研究方向。")
+            return
+
+        keywords = [k.strip() for k in self.keyword_entry.get().split(",")]
+        keywords = [k for k in keywords if k]
+        if not keywords:
+            messagebox.showwarning("输入错误", "请输入搜索关键词。")
+            return
+
+        try:
+            top = int(self.quick_top.get())
+            if top < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            messagebox.showwarning("输入错误", "「前 N 篇」要填一个正整数。")
+            return
+
+        since = last_fetch(profile_key)
+        if since is None:
+            since = date.today() - timedelta(days=7)
+            print(f"[CatchEdge] 没有抓取记录，本次抓最近 7 天（{since} 起）")
+
+        today = date.today()
+        categories = [code for code, var in self.cat_vars.items() if var.get()]
+
+        self.search_btn.config(state="disabled")
+        self.quick_btn.config(state="disabled")
+        self.cancel_event = threading.Event()
+        self.progress_win = ProgressWindow(self.root, on_cancel=self.cancel_event.set)
+
+        threading.Thread(
+            target=self._do_search,
+            args=(profile_key, keywords, (since.year, since.month),
+                  (today.year, today.month), categories, True,
+                  self.cancel_event.is_set, since, top),
+            daemon=True,
+        ).start()
+
     def _do_search(self, profile_key, keywords, start_ym, end_ym, categories,
-                   only_new, should_stop=None):
+                   only_new, should_stop=None, since=None, top=None):
         try:
             searcher = ArxivSearcher(max_results=MAX_RESULTS_PER_KEYWORD)
 
@@ -266,6 +364,7 @@ class App:
                     categories=categories,
                     progress_callback=on_progress,
                     should_stop=should_stop,
+                    since=since,
                 )
                 if result.cancelled:
                     cancelled = True
@@ -284,9 +383,18 @@ class App:
 
             papers_all = list(fetched.values())
             if not papers_all:
-                # 抓取中断时不要把"接口失败"误报成"没搜到论文"
-                msg = errors[0] if errors else "未找到相关论文，请调整关键词、日期或分类。"
-                self.root.after(0, lambda: self._on_finish(False, msg, None, None))
+                if errors:
+                    # 抓取中断时不要把"接口失败"误报成"没搜到论文"
+                    msg = errors[0]
+                    self.root.after(0, lambda: self._on_finish(False, msg, None, None))
+                elif since is not None:
+                    msg = (f"增量窗口是 {since} 之后，这段时间没有新论文。\n\n"
+                           f"如果你刚刚跑过一次，这是正常的——"
+                           f"改天再点，或者用上面的「确定并导出」按日期范围抓。")
+                    self.root.after(0, lambda: self._on_finish(True, msg, None, None))
+                else:
+                    msg = "未找到相关论文，请调整关键词、日期或分类。"
+                    self.root.after(0, lambda: self._on_finish(False, msg, None, None))
                 return
 
             seen = load_state(profile_key)["seen_ids"]
@@ -294,15 +402,27 @@ class App:
             papers = new_papers if only_new else papers_all
 
             # 抓到的全部记账，不论这次是否展示，否则关掉"只看新增"再打开会重复
-            mark_seen(profile_key, list(fetched), date.today())
+            # 有请求失败时不推进 last_fetch，否则增量模式会永久漏掉那段时间
+            mark_seen(profile_key, list(fetched), date.today(),
+                      advance_date=not errors)
 
             if not papers:
                 msg = f"抓取到 {len(papers_all)} 篇，新增 0 篇（这些论文都已看过）。"
                 self.root.after(0, lambda: self._on_finish(True, msg, None, None))
                 return
 
+            llm_error = self._score_with_llm(papers, self.profiles[profile_key])
+            papers.sort(key=lambda p: p.get('published', ''), reverse=True)
+            papers.sort(key=lambda p: p.get('score', -1), reverse=True)
+            if top:
+                papers = papers[:top]
+
             base_name = f"daily_{profile_key}_{date.today():%Y-%m-%d}"
-            excel_path = ExcelExporter.export(papers, filename=f"{base_name}.xlsx")
+            if top:
+                base_name += f"_top{top}"
+            run_dir = os.path.join(OUTPUT_ROOT, base_name)
+            excel_path = ExcelExporter.export(papers, filename="report.xlsx",
+                                              output_dir=run_dir)
 
             meta = {
                 'keyword': ", ".join(keywords),
@@ -310,7 +430,8 @@ class App:
                 'end_ym': end_ym,
                 'categories': categories,
             }
-            md_path = MarkdownExporter.export(papers, meta, filename=f"{base_name}.md")
+            md_path = MarkdownExporter.export(papers, meta, filename="report.md",
+                                              output_dir=run_dir)
 
             if excel_path and md_path:
                 seen_count = len(papers_all) - len(new_papers)
@@ -318,6 +439,17 @@ class App:
                        f"已见过 {seen_count} 篇，本次导出 {len(papers)} 篇\n\n"
                        f"Excel: {excel_path}\n"
                        f"Markdown: {md_path}")
+                if top:
+                    msg = (f"增量模式：抓取 {len(papers_all)} 篇，新增 {len(new_papers)} 篇，"
+                           f"导出最值得看的前 {len(papers)} 篇\n\n"
+                           f"Excel: {excel_path}\n"
+                           f"Markdown: {md_path}")
+                if llm.USAGE["prompt_tokens"]:
+                    msg += (f"\n\n模型用量 {llm.USAGE['prompt_tokens']} 输入 / "
+                            f"{llm.USAGE['completion_tokens']} 输出 tokens，"
+                            f"约 {llm.estimate_cost():.4f} 元")
+                if llm_error:
+                    msg += f"\n\n注意：模型调用有问题，部分论文只有规则分。\n{llm_error}"
                 if truncated:
                     msg += (f"\n\n注意：结果被截断（已达 {searcher.max_results} 条上限），"
                             f"可能还有更多论文。")
@@ -337,14 +469,29 @@ class App:
             self.progress_win = None
 
         self.search_btn.config(state="normal")
+        self.quick_btn.config(state="normal")
 
         if success:
-            messagebox.showinfo("完成", message)
+            if md_path:
+                # 直接把 Markdown 打开，省得去文件夹里翻
+                if messagebox.askyesno("完成", message + "\n\n要现在打开 Markdown 吗？"):
+                    open_with_default_app(md_path)
+            else:
+                messagebox.showinfo("完成", message)
         else:
             messagebox.showerror("错误", message)
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = App(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        app = App(root)
+        root.mainloop()
+    except Exception:
+        # 双击 .bat 用 pythonw 启动时没有控制台，异常只能落盘
+        import traceback
+        log_dir = os.path.join(PROJECT_ROOT, "output")
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "ui_error.log"), "a", encoding="utf-8") as f:
+            f.write(traceback.format_exc() + "\n")
+        raise
