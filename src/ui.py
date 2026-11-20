@@ -3,7 +3,7 @@ import os
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from datetime import date, datetime, timedelta
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,7 +14,7 @@ from src import llm
 from src.arxiv_api import ArxivSearcher, paper_id
 from src.excel_exporter import ExcelExporter
 from src.markdown_exporter import MarkdownExporter
-from src.profile import load_profiles
+from src.profile import Profile, load_profiles, save_profiles
 from src.scorer import LLMScorer, llm_score
 from src.state import last_fetch, load_state, mark_seen
 
@@ -141,6 +141,16 @@ class App:
         tk.Checkbutton(profile_frame, text="只看新增",
                        variable=self.only_new).pack(side="left")
 
+        # 研究方向的增删改：改完立刻写回 profiles.yaml
+        manage = tk.Frame(self.root)
+        manage.pack(fill="x", padx=20, pady=(4, 0))
+        tk.Button(manage, text="新建方向", command=self._on_new_profile,
+                  relief="flat", padx=8).pack(side="left")
+        tk.Button(manage, text="保存当前设置", command=self._on_save_profile,
+                  relief="flat", padx=8).pack(side="left", padx=6)
+        tk.Button(manage, text="删除方向", command=self._on_delete_profile,
+                  relief="flat", padx=8).pack(side="left")
+
         tk.Label(self.root, text="搜索关键词（多个用逗号分隔）:",
                  anchor="w").pack(fill="x", padx=20, pady=(12, 4))
         self.keyword_entry = tk.Entry(self.root, width=70)
@@ -200,20 +210,23 @@ class App:
         )
         self.search_btn.pack(pady=(14, 8))
 
-        # 增量模式：不用选日期，从上次抓取日往后，只导出前 N 篇
+        # 「只导出前 N 篇」对两个按钮都生效；默认不勾，绿色按钮保持导出全部
         quick_frame = tk.Frame(self.root)
         quick_frame.pack(pady=(0, 16))
-        tk.Label(quick_frame, text="增量跑一轮（从上次抓取日之后，只导出前"
-                 ).pack(side="left")
-        self.quick_top = tk.StringVar(value="20")
+        self.limit_on = tk.BooleanVar(value=False)
+        tk.Checkbutton(quick_frame, text="只导出前",
+                       variable=self.limit_on).pack(side="left")
+        self.limit_top = tk.StringVar(value="20")
         ttk.Spinbox(quick_frame, from_=1, to=200, width=5,
-                    textvariable=self.quick_top).pack(side="left", padx=4)
-        tk.Label(quick_frame, text="篇）").pack(side="left")
+                    textvariable=self.limit_top).pack(side="left", padx=4)
+        tk.Label(quick_frame, text="篇").pack(side="left")
+
         self.quick_btn = tk.Button(
-            quick_frame, text="开始", command=self.start_quick,
-            bg="#2196F3", fg="white", padx=16, pady=3, relief="flat"
+            quick_frame, text="增量跑一轮（上次之后，前 N 篇）",
+            command=self.start_quick,
+            bg="#2196F3", fg="white", padx=12, pady=3, relief="flat"
         )
-        self.quick_btn.pack(side="left", padx=(10, 0))
+        self.quick_btn.pack(side="left", padx=(14, 0))
 
         if self.profiles:
             first = next(iter(self.profiles))
@@ -268,6 +281,110 @@ class App:
             )
         return scorer.last_error
 
+    def _limit_value(self, always=False):
+        """返回要截断的篇数；返回 None 表示不限制。
+
+        always=True 用于增量按钮：它必须有个上限，所以无视复选框。
+        """
+        if not always and not self.limit_on.get():
+            return None
+        try:
+            value = int(self.limit_top.get())
+        except (TypeError, ValueError):
+            raise ValueError("「只导出前 N 篇」要填一个正整数。")
+        if value < 1:
+            raise ValueError("「只导出前 N 篇」要填一个正整数。")
+        return value
+
+    def _persist_keywords(self, profile_key, keywords):
+        """把界面上改过的关键词写回 profiles.yaml，避免下次启动又被还原。"""
+        profile = self.profiles.get(profile_key)
+        if not profile or list(profile.keywords) == list(keywords):
+            return
+        profile.keywords = list(keywords)
+        try:
+            save_profiles(self.profiles)
+        except OSError as e:
+            print(f"[CatchEdge] 保存关键词失败：{e}")
+
+    def _refresh_profiles(self, select=None):
+        values = [self._profile_label(k, p) for k, p in self.profiles.items()]
+        self.profile_combo.config(values=values)
+        key = select or next(iter(self.profiles))
+        self.profile_combo.set(self._profile_label(key, self.profiles[key]))
+        self._apply_profile(key)
+
+    def _on_new_profile(self):
+        key = simpledialog.askstring(
+            "新建研究方向", "短标识（英文/数字，例如 vlm）：", parent=self.root)
+        if not key:
+            return
+        key = key.strip()
+        if not key:
+            return
+        if key in self.profiles:
+            messagebox.showwarning("重名", f"已经有一个叫「{key}」的方向了。")
+            return
+
+        name = simpledialog.askstring(
+            "新建研究方向", "显示名称（例如 视觉语言模型）：", parent=self.root)
+        name = (name or "").strip() or key
+
+        self.profiles[key] = Profile(name=name)
+        try:
+            save_profiles(self.profiles)
+        except OSError as e:
+            messagebox.showerror("保存失败", f"写不进 profiles.yaml：\n{e}")
+            return
+        self._refresh_profiles(select=key)
+        messagebox.showinfo(
+            "已创建",
+            f"已新增「{name}」。\n\n关键词还是空的，填好后点「保存当前设置」。")
+
+    def _on_delete_profile(self):
+        key = self._selected_profile_key()
+        if not key:
+            return
+        if len(self.profiles) <= 1:
+            messagebox.showwarning("不能删", "至少要留一个研究方向。")
+            return
+        profile = self.profiles[key]
+        if not messagebox.askyesno(
+                "删除方向",
+                f"确定删除「{profile.name}」？\n\n只删配置，不会删已导出的结果。"):
+            return
+        del self.profiles[key]
+        try:
+            save_profiles(self.profiles)
+        except OSError as e:
+            messagebox.showerror("保存失败", f"写不进 profiles.yaml：\n{e}")
+            return
+        self._refresh_profiles()
+
+    def _on_save_profile(self):
+        key = self._selected_profile_key()
+        if not key:
+            return
+        keywords = [k.strip() for k in self.keyword_entry.get().split(",")]
+        keywords = [k for k in keywords if k]
+        if not keywords:
+            messagebox.showwarning("不能保存", "关键词不能为空。")
+            return
+
+        profile = self.profiles[key]
+        profile.keywords = keywords
+        profile.categories = [code for code, var in self.cat_vars.items() if var.get()]
+        try:
+            save_profiles(self.profiles)
+        except OSError as e:
+            messagebox.showerror("保存失败", f"写不进 profiles.yaml：\n{e}")
+            return
+        messagebox.showinfo(
+            "已保存",
+            f"「{profile.name}」已写入 profiles.yaml：\n"
+            f"关键词 {len(keywords)} 个，分类 {len(profile.categories)} 个。\n\n"
+            f"terms / exclude / interest 需要直接编辑文件。")
+
     def start_search(self):
         profile_key = self._selected_profile_key()
         if not profile_key:
@@ -289,14 +406,23 @@ class App:
 
         categories = [code for code, var in self.cat_vars.items() if var.get()]
 
+        try:
+            top = self._limit_value()
+        except ValueError as e:
+            messagebox.showwarning("输入错误", str(e))
+            return
+
+        self._persist_keywords(profile_key, keywords)
+
         self.search_btn.config(state="disabled")
+        self.quick_btn.config(state="disabled")
         self.cancel_event = threading.Event()
         self.progress_win = ProgressWindow(self.root, on_cancel=self.cancel_event.set)
 
         threading.Thread(
             target=self._do_search,
             args=(profile_key, keywords, start_ym, end_ym, categories,
-                  self.only_new.get(), self.cancel_event.is_set),
+                  self.only_new.get(), self.cancel_event.is_set, None, top),
             daemon=True,
         ).start()
 
@@ -314,11 +440,9 @@ class App:
             return
 
         try:
-            top = int(self.quick_top.get())
-            if top < 1:
-                raise ValueError
-        except (TypeError, ValueError):
-            messagebox.showwarning("输入错误", "「前 N 篇」要填一个正整数。")
+            top = self._limit_value(always=True)
+        except ValueError as e:
+            messagebox.showwarning("输入错误", str(e))
             return
 
         since = last_fetch(profile_key)
@@ -328,6 +452,8 @@ class App:
 
         today = date.today()
         categories = [code for code, var in self.cat_vars.items() if var.get()]
+
+        self._persist_keywords(profile_key, keywords)
 
         self.search_btn.config(state="disabled")
         self.quick_btn.config(state="disabled")
@@ -435,15 +561,17 @@ class App:
 
             if excel_path and md_path:
                 seen_count = len(papers_all) - len(new_papers)
-                msg = (f"共抓取 {len(papers_all)} 篇：新增 {len(new_papers)} 篇，"
-                       f"已见过 {seen_count} 篇，本次导出 {len(papers)} 篇\n\n"
-                       f"Excel: {excel_path}\n"
-                       f"Markdown: {md_path}")
+                if since is not None:
+                    head = (f"增量模式：抓取 {len(papers_all)} 篇，"
+                            f"新增 {len(new_papers)} 篇")
+                else:
+                    head = (f"共抓取 {len(papers_all)} 篇：新增 {len(new_papers)} 篇，"
+                            f"已见过 {seen_count} 篇")
                 if top:
-                    msg = (f"增量模式：抓取 {len(papers_all)} 篇，新增 {len(new_papers)} 篇，"
-                           f"导出最值得看的前 {len(papers)} 篇\n\n"
-                           f"Excel: {excel_path}\n"
-                           f"Markdown: {md_path}")
+                    head += f"，只保留最值得看的前 {len(papers)} 篇"
+                else:
+                    head += f"，本次导出 {len(papers)} 篇"
+                msg = f"{head}\n\nExcel: {excel_path}\nMarkdown: {md_path}"
                 if llm.USAGE["prompt_tokens"]:
                     msg += (f"\n\n模型用量 {llm.USAGE['prompt_tokens']} 输入 / "
                             f"{llm.USAGE['completion_tokens']} 输出 tokens，"

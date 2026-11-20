@@ -8,6 +8,17 @@ import yaml
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_PATH = os.path.join(PROJECT_ROOT, "profiles.yaml")
 
+# 每次保存都会重写这个头，字段含义不至于丢
+HEADER = """\
+# 每个研究方向一份配置。本文件会由 CatchEdge 界面改写，也可以手动编辑。
+#
+# keywords   发给 arXiv 的检索词（多个用逗号分隔，也可写成列表）
+# terms      打分用的领域专有词；留空则退回用 keywords
+# categories arXiv 分类，留空 = 不限
+# exclude    命中即剔除
+# interest   交给模型的兴趣描述，写得越具体判断越准
+"""
+
 
 @dataclass
 class Profile:
@@ -66,3 +77,29 @@ def load_profiles(path=DEFAULT_PATH):
             interest=item.get("interest") or "",
         )
     return profiles
+
+
+def save_profiles(profiles, path=DEFAULT_PATH):
+    """把全部研究方向写回 profiles.yaml。
+
+    会重写整个文件：界面上新增/删除的方向、改过的关键词都靠它落盘。
+    手写在文件里的行内注释会在保存后丢失，所以字段说明放在文件头。
+    """
+    data = {"profiles": {}}
+    for key, profile in profiles.items():
+        data["profiles"][key] = {
+            "name": profile.name,
+            "keywords": list(profile.keywords),
+            "terms": list(profile.terms),
+            "categories": list(profile.categories),
+            "exclude": list(profile.exclude),
+            "interest": profile.interest,
+        }
+
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(HEADER)
+        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False,
+                       default_flow_style=False)
